@@ -25,13 +25,13 @@ try:
     SUPABASE_URL = os.getenv('SUPABASE_URL')
     SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
-    # === KREDENSIAL USERBOT TELETHON ===
-    USERBOT_API_ID = int(os.getenv('USERBOT_API_ID') or 0)
-    USERBOT_API_HASH = os.getenv('USERBOT_API_HASH')
-    USERBOT_PHONE = os.getenv('USERBOT_PHONE')
+    # === KREDENSIAL  TELETHON ===
+    _API_ID = int(os.getenv('_API_ID') or 0)
+    _API_HASH = os.getenv('_API_HASH')
+    _PHONE = os.getenv('_PHONE')
     
     # Penarikan string session
-    USERBOT_SESSION = os.getenv('USERBOT_SESSION_STRING')
+    _SESSION = os.getenv('_SESSION_STRING')
 except Exception as e:
     print(f"⚠️ Error mengambil Secrets dari Heroku: {e}")
 
@@ -46,8 +46,8 @@ try:
 except Exception as e:
     logger.error(f"Gagal koneksi ke Supabase: {e}")
 
-# Inisialisasi Client Telethon (Userbot)
-userbot = TelegramClient(StringSession(USERBOT_SESSION), USERBOT_API_ID, USERBOT_API_HASH)
+# Inisialisasi Client Telethon ()
+ = TelegramClient(StringSession(_SESSION), _API_ID, _API_HASH)
 
 CACHE_HASHTAGS = []
 required_channels = []
@@ -108,10 +108,10 @@ async def on_startup(application: Application):
         await update_banned_users_cache()
 
         # Mulai sesi Telethon saat bot startup
-        await userbot.start(phone=USERBOT_PHONE)
-        logger.info("✅ Userbot (Akun Asli) siap dan terhubung!")
+        await .start(phone=_PHONE)
+        logger.info("✅  (Akun Asli) siap dan terhubung!")
     except Exception as e:
-        logger.error(f"⚠️ Gagal get_me atau start userbot saat startup: {e}")
+        logger.error(f"⚠️ Gagal get_me atau start  saat startup: {e}")
 
 def save_required_channels(channels):
     try:
@@ -259,7 +259,9 @@ async def search_with_userbot(targets: list, channels: list):
                     link = f"https://t.me/{ch}/{message.id}"
                     if link not in found_links:
                         found_links.append(link)
-            except Exception: pass
+            except Exception as e:
+                # Log error supaya ketahuan kalau ada limit/floodwait dari Telethon
+                logger.error(f"Telethon error saat cari '{target}' di @{ch}: {e}")
     return found_links
 
 async def check_penipu(update: Update, context: CallbackContext):
@@ -274,7 +276,9 @@ async def check_penipu(update: Update, context: CallbackContext):
         if update.effective_chat.id == ADMIN_GROUP_ID:
             replied_text = replied_msg.text or replied_msg.caption or ""
             match_id = re.search(r"ID:?\s*`?(\d+)`?", replied_text, re.IGNORECASE)
-            match_user = re.search(r"Username:?\s*@?([a-zA-Z0-9_]+)", replied_text, re.IGNORECASE)
+            
+            # FIX: Tangkap "Username:" atau "Pengirim:" biar nggak Miss
+            match_user = re.search(r"(?:Username|Pengirim):?\s*@?([a-zA-Z0-9_]+)", replied_text, re.IGNORECASE)
 
             if match_id: target_id = match_id.group(1)
             if match_user and match_user.group(1).lower() != 'none': target_username = f"@{match_user.group(1)}"
@@ -324,7 +328,8 @@ async def check_penipu(update: Update, context: CallbackContext):
     # Update loading text setelah dapet data ID/Usernamenya
     await loading_msg.edit_text(f"⏳ Melacak rekam jejak {target_display} di database...", parse_mode="HTML")
 
-    channels = ["bantaipenip", "rekampenipu", "spillhnr", "jejak_penipu"]
+    # FIX: Typo bantaipenip diperbaiki ke bantaipenipu
+    channels = ["bantaipenipu", "rekampenipu", "spillhnr", "jejak_penipu"]
     found_posts = await search_with_userbot(targets_to_search, channels)
 
     if found_posts:
@@ -335,7 +340,7 @@ async def check_penipu(update: Update, context: CallbackContext):
         keyboard = [[InlineKeyboardButton(f"🔍 Cek @{ch}", url=f"https://t.me/{ch}")] for ch in channels]
         reply_text = f"✅ {target_display} <b>belum ditemukan</b> di database otomatis kami.\n\n⚠️ Silakan buka dan cek ulang secara manual:"
         await loading_msg.edit_text(reply_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
-
+        
 # ==========================================
 # MENFESS & NORMAL HANDLERS
 # ==========================================
