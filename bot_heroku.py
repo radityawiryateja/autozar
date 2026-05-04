@@ -46,8 +46,12 @@ try:
 except Exception as e:
     logger.error(f"Gagal koneksi ke Supabase: {e}")
 
-# Inisialisasi Client Telethon ()
- = TelegramClient(StringSession(_SESSION), _API_ID, _API_HASH)
+# Inisialisasi Client Telethon (Userbot)
+# Pastikan baris di bawah ini mentok ke kiri batas layar text editor kamu
+userbot = TelegramClient(StringSession(USERBOT_SESSION), USERBOT_API_ID, USERBOT_API_HASH)
+
+CACHE_HASHTAGS = []
+required_channels = []
 
 CACHE_HASHTAGS = []
 required_channels = []
