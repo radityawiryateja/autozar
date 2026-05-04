@@ -9,7 +9,6 @@ import asyncio
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from supabase import create_client
-import os
 from telethon.sessions import StringSession
 
 # Import Telethon untuk Userbot
@@ -25,7 +24,7 @@ try:
     SUPABASE_URL = os.getenv('SUPABASE_URL')
     SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
-    # === KREDENSIAL  TELETHON ===
+    # === KREDENSIAL TELETHON ===
     _API_ID = int(os.getenv('_API_ID') or 0)
     _API_HASH = os.getenv('_API_HASH')
     _PHONE = os.getenv('_PHONE')
@@ -47,11 +46,8 @@ except Exception as e:
     logger.error(f"Gagal koneksi ke Supabase: {e}")
 
 # Inisialisasi Client Telethon (Userbot)
-# Pastikan baris di bawah ini mentok ke kiri batas layar text editor kamu
-userbot = TelegramClient(StringSession(USERBOT_SESSION), USERBOT_API_ID, USERBOT_API_HASH)
-
-CACHE_HASHTAGS = []
-required_channels = []
+# Telah diperbaiki: Menggunakan variabel environment yang benar
+userbot = TelegramClient(StringSession(_SESSION), _API_ID, _API_HASH)
 
 CACHE_HASHTAGS = []
 required_channels = []
@@ -112,10 +108,11 @@ async def on_startup(application: Application):
         await update_banned_users_cache()
 
         # Mulai sesi Telethon saat bot startup
-        await .start(phone=_PHONE)
-        logger.info("✅  (Akun Asli) siap dan terhubung!")
+        # Telah diperbaiki: Menambahkan 'userbot' sebelum .start
+        await userbot.start(phone=_PHONE)
+        logger.info("✅ Userbot (Akun Asli) siap dan terhubung!")
     except Exception as e:
-        logger.error(f"⚠️ Gagal get_me atau start  saat startup: {e}")
+        logger.error(f"⚠️ Gagal get_me atau start saat startup: {e}")
 
 def save_required_channels(channels):
     try:
@@ -722,7 +719,7 @@ def main():
     application.add_handler(CommandHandler("deletecommand", delete_command))
     application.add_handler(CommandHandler("settings", settings))
 
-  # Ini dia handler fitur barunya (Check Penipu)
+    # Ini dia handler fitur barunya (Check Penipu)
     application.add_handler(CommandHandler("check", check_penipu))
 
     # Message & Callback Handlers
