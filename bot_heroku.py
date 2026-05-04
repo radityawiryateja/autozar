@@ -398,9 +398,11 @@ async def handle_pesan(update: Update, context: CallbackContext):
 
     text_without_hashtag = text_content
     for ht in CACHE_HASHTAGS:
-        text_without_hashtag = re.sub(re.escape(ht), "", text_without_hashtag, flags=re.IGNORECASE)
+        # Tambahkan #? di regex agar bot otomatis menghapus awalan # (jika ada) saat memfilter
+        text_without_hashtag = re.sub(r'#?' + re.escape(ht), "", text_without_hashtag, flags=re.IGNORECASE)
 
-    if is_direct_forward and not text_without_hashtag.strip() and not (update.message.photo or update.message.video or update.message.document or update.message.audio or update.message.voice or update.message.sticker):
+    # Tambahkan .replace("#", "") sebagai proteksi ganda jika pengirim mengetik spasi setelah hashtag
+    if is_direct_forward and not text_without_hashtag.replace("#", "").strip() and not (update.message.photo or update.message.video or update.message.document or update.message.audio or update.message.voice or update.message.sticker):
         return await update.message.reply_text("⚠️ Harap isi pesan terlebih dahulu sebelum mengirim!")
 
     if is_direct_forward:
