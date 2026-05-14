@@ -1,13 +1,14 @@
 import json
 import logging
 import re
+import html
 import markdown
 import os
 import asyncio
 
 
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions
 from supabase import create_client
 import os
 from telethon.sessions import StringSession
@@ -40,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 bot_active = True
 MENFESS_MODE = "auto"
+SELLER_VERIFIED_TITLE = os.getenv("SELLER_VERIFIED_TITLE", "verified 🫆")
+KEYBOARD_STATE_VERIFY_SELLER = "WAITING_SELLER_VERIFICATION_FORM"
+KEYBOARD_STATE_CHECK_PENIPU = "WAITING_CHECK_PENIPU_TARGET"
 
 try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -56,44 +60,55 @@ CACHE_COMSECT_OFF = set()
 CACHE_BAD_WORDS = set()
 
 # ==========================================
+# NON-BLOCKING DATABASE HELPER
+# ==========================================
+async def db(fn):
+    """Jalankan query Supabase sinkron di thread agar event loop bot tidak stuck saat ramai."""
+    return await asyncio.to_thread(fn)
+
+# ==========================================
 # CACHE & STARTUP FUNCTIONS
 # ==========================================
 async def update_settings_cache():
-    global MENFESS_MODE
+    global MENFESS_MODE, bot_active
     try:
-        response = supabase.table("bot_settings").select("value").eq("key", "menfess_mode").execute()
+        response = await db(lambda: supabase.table("bot_settings").select("key, value").execute())
         if hasattr(response, 'data') and response.data:
-            MENFESS_MODE = response.data[0]["value"]
+            settings = {row["key"]: row["value"] for row in response.data}
+            MENFESS_MODE = settings.get("menfess_mode", "auto")
+            bot_active = str(settings.get("bot_active", "true")).lower() != "false"
         else:
-            supabase.table("bot_settings").insert({"key": "menfess_mode", "value": "auto"}).execute()
+            await db(lambda: supabase.table("bot_settings").insert({"key": "menfess_mode", "value": "auto"}).execute())
+            await db(lambda: supabase.table("bot_settings").insert({"key": "bot_active", "value": "true"}).execute())
             MENFESS_MODE = "auto"
+            bot_active = True
     except Exception as e: logger.error(f"Gagal memuat setting bot: {e}")
 
 async def update_hashtags_cache():
     global CACHE_HASHTAGS
     try:
-        response = supabase.table("triggered_hashtags").select("hashtag").eq("active", True).execute()
+        response = await db(lambda: supabase.table("triggered_hashtags").select("hashtag").eq("active", True).execute())
         CACHE_HASHTAGS = [row["hashtag"] for row in response.data] if hasattr(response, 'data') and response.data else []
     except Exception as e: logger.error(f"Gagal memuat cache hashtag: {e}")
 
 async def update_badwords_cache():
     global CACHE_BAD_WORDS
     try:
-        response = supabase.table("bad_words").select("word").execute()
+        response = await db(lambda: supabase.table("bad_words").select("word").execute())
         CACHE_BAD_WORDS = {row["word"].lower() for row in response.data} if hasattr(response, 'data') and response.data else set()
     except Exception as e: logger.error(f"Gagal memuat cache bad words: {e}")
 
 async def update_required_channels_cache():
     global required_channels
     try:
-        response = supabase.table('required_channels').select("channel_username").execute()
+        response = await db(lambda: supabase.table('required_channels').select("channel_username").execute())
         required_channels = [row["channel_username"] for row in response.data] if hasattr(response, 'data') and response.data else []
     except Exception as e: logger.error(f"Gagal memuat required channels: {e}")
 
 async def update_banned_users_cache():
     global CACHE_BANNED_USERS
     try:
-        response = supabase.table('banned_users').select("user_id").execute()
+        response = await db(lambda: supabase.table('banned_users').select("user_id").execute())
         CACHE_BANNED_USERS = [row["user_id"] for row in response.data] if hasattr(response, 'data') and response.data else []
     except Exception as e: logger.error(f"Gagal memuat banned users: {e}")
 
@@ -113,11 +128,11 @@ async def on_startup(application: Application):
     except Exception as e:
         logger.error(f"⚠️ Gagal get_me atau start userbot saat startup: {e}")
 
-def save_required_channels(channels):
+async def save_required_channels(channels):
     try:
-        supabase.table('required_channels').delete().neq("channel_username", "").execute()
+        await db(lambda: supabase.table('required_channels').delete().neq("channel_username", "").execute())
         for channel in channels:
-            supabase.table('required_channels').insert({"channel_username": channel}).execute()
+            await db(lambda: supabase.table('required_channels').insert({"channel_username": channel}).execute())
     except Exception as e:
         logger.error(f"Gagal menyimpan required channels: {e}")
 
@@ -142,7 +157,7 @@ async def add_badwords(update: Update, context: CallbackContext):
     for w in words:
         if w:
             try:
-                supabase.table("bad_words").upsert({"word": w}).execute()
+                await db(lambda: supabase.table("bad_words").upsert({"word": w}).execute())
                 inserted += 1
             except Exception: pass
     await update_badwords_cache()
@@ -157,7 +172,7 @@ async def remove_badwords(update: Update, context: CallbackContext):
     for w in words:
         if w:
             try:
-                supabase.table("bad_words").delete().eq("word", w).execute()
+                await db(lambda: supabase.table("bad_words").delete().eq("word", w).execute())
                 deleted += 1
             except Exception: pass
     await update_badwords_cache()
@@ -174,7 +189,7 @@ async def block_user(update: Update, context: CallbackContext):
     if not context.args: return await update.message.reply_text("Format: /block <user_id>")
     try:
         target_id = int(context.args[0])
-        supabase.table("banned_users").upsert({"user_id": target_id}).execute()
+        await db(lambda: supabase.table("banned_users").upsert({"user_id": target_id}).execute())
         await update_banned_users_cache()
         await update.message.reply_text(f"✅ User `{target_id}` berhasil diblokir dari bot.", parse_mode="Markdown")
     except Exception: await update.message.reply_text("❌ Gagal memblokir user. Pastikan format ID benar.")
@@ -184,7 +199,7 @@ async def unblock_user(update: Update, context: CallbackContext):
     if not context.args: return await update.message.reply_text("Format: /unblock <user_id>")
     try:
         target_id = int(context.args[0])
-        supabase.table("banned_users").delete().eq("user_id", target_id).execute()
+        await db(lambda: supabase.table("banned_users").delete().eq("user_id", target_id).execute())
         await update_banned_users_cache()
         await update.message.reply_text(f"✅ User `{target_id}` berhasil di-unblock.", parse_mode="Markdown")
     except Exception: await update.message.reply_text("❌ Gagal unblock user.")
@@ -193,7 +208,7 @@ async def set_mode_auto(update: Update, context: CallbackContext):
     if update.effective_chat.id != ADMIN_GROUP_ID: return
     global MENFESS_MODE
     MENFESS_MODE = "auto"
-    try: supabase.table("bot_settings").upsert({"key": "menfess_mode", "value": "auto"}).execute()
+    try: await db(lambda: supabase.table("bot_settings").upsert({"key": "menfess_mode", "value": "auto"}).execute())
     except Exception: pass
     await update.message.reply_text("✅ Mode menfess diubah ke *AUTO*. Menfess akan langsung terkirim ke channel.", parse_mode="Markdown")
 
@@ -201,7 +216,7 @@ async def set_mode_manual(update: Update, context: CallbackContext):
     if update.effective_chat.id != ADMIN_GROUP_ID: return
     global MENFESS_MODE
     MENFESS_MODE = "manual"
-    try: supabase.table("bot_settings").upsert({"key": "menfess_mode", "value": "manual"}).execute()
+    try: await db(lambda: supabase.table("bot_settings").upsert({"key": "menfess_mode", "value": "manual"}).execute())
     except Exception: pass
     await update.message.reply_text("⏸️ Mode menfess diubah ke *MANUAL*. Menfess akan masuk ke grup admin untuk direview terlebih dahulu.", parse_mode="Markdown")
 
@@ -209,7 +224,7 @@ async def add_hashtag(update: Update, context: CallbackContext):
     if update.effective_chat.id != ADMIN_GROUP_ID: return
     if not context.args: return await update.message.reply_text("Gunakan format: /addhashtag <hashtag>")
     hashtag = context.args[0].strip()
-    supabase.table("triggered_hashtags").upsert({"hashtag": hashtag}).execute()
+    await db(lambda: supabase.table("triggered_hashtags").upsert({"hashtag": hashtag}).execute())
     await update_hashtags_cache()
     await update.message.reply_text(f"✅ Hashtag `{hashtag}` berhasil ditambahkan!", parse_mode="Markdown")
 
@@ -217,7 +232,7 @@ async def remove_hashtag(update: Update, context: CallbackContext):
     if update.effective_chat.id != ADMIN_GROUP_ID: return
     if not context.args: return await update.message.reply_text("Gunakan format: /removehashtag <hashtag>")
     hashtag = context.args[0].strip()
-    supabase.table("triggered_hashtags").delete().eq("hashtag", hashtag).execute()
+    await db(lambda: supabase.table("triggered_hashtags").delete().eq("hashtag", hashtag).execute())
     await update_hashtags_cache()
     await update.message.reply_text(f"❌ Hashtag `{hashtag}` berhasil dihapus!", parse_mode="Markdown")
 
@@ -225,7 +240,7 @@ async def enable_hashtag(update: Update, context: CallbackContext):
     if update.effective_chat.id != ADMIN_GROUP_ID: return
     if not context.args: return await update.message.reply_text("Gunakan format: /enablehashtag <hashtag>")
     hashtag = context.args[0].strip()
-    supabase.table("triggered_hashtags").update({"active": True}).eq("hashtag", hashtag).execute()
+    await db(lambda: supabase.table("triggered_hashtags").update({"active": True}).eq("hashtag", hashtag).execute())
     await update_hashtags_cache()
     await update.message.reply_text(f"✅ Hashtag `{hashtag}` diaktifkan!", parse_mode="Markdown")
 
@@ -233,7 +248,7 @@ async def disable_hashtag(update: Update, context: CallbackContext):
     if update.effective_chat.id != ADMIN_GROUP_ID: return
     if not context.args: return await update.message.reply_text("Gunakan format: /disablehashtag <hashtag>")
     hashtag = context.args[0].strip()
-    supabase.table("triggered_hashtags").update({"active": False}).eq("hashtag", hashtag).execute()
+    await db(lambda: supabase.table("triggered_hashtags").update({"active": False}).eq("hashtag", hashtag).execute())
     await update_hashtags_cache()
     await update.message.reply_text(f"⚠️ Hashtag `{hashtag}` dinonaktifkan!", parse_mode="Markdown")
 
@@ -242,7 +257,7 @@ async def set_required_channels(update: Update, context: CallbackContext):
     if not context.args: return await update.message.reply_text("Gunakan format: /setrequired @channel1 @channel2")
     global required_channels
     required_channels = context.args
-    save_required_channels(required_channels)
+    await save_required_channels(required_channels)
     await update.message.reply_text(f"Daftar channel wajib diikuti telah diperbarui: {', '.join(required_channels)}")
 
 # ==========================================
@@ -262,12 +277,21 @@ async def search_with_userbot(targets: list, channels: list):
             except Exception: pass
     return found_links
 
-async def check_penipu(update: Update, context: CallbackContext):
+async def process_check_penipu(update: Update, context: CallbackContext, raw_target: str = None):
     target_id = None
     target_username = None
 
-    # 1. PRIORITAS UTAMA: Cek apakah command ini me-reply sebuah pesan
-    if update.message.reply_to_message:
+    # 1. Jika dipanggil dari tombol keyboard, target dibaca dari teks yang dikirim user.
+    if raw_target:
+        arg = raw_target.strip()
+        arg = arg.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
+        if arg.isdigit():
+            target_id = arg
+        else:
+            target_username = arg if arg.startswith('@') else f"@{arg}"
+
+    # 2. PRIORITAS COMMAND: Cek apakah command ini me-reply sebuah pesan.
+    elif update.message.reply_to_message:
         replied_msg = update.message.reply_to_message
 
         # Ekstrak ID dari pesan laporan/log jika dilakukan dari Grup Admin
@@ -284,9 +308,10 @@ async def check_penipu(update: Update, context: CallbackContext):
             target_id = str(replied_msg.from_user.id)
             if replied_msg.from_user.username: target_username = f"@{replied_msg.from_user.username}"
 
-    # 2. Jika BUKAN reply pesan, baru baca teks setelah command (misal: /check @username)
+    # 3. Jika BUKAN reply pesan, baru baca teks setelah command (misal: /check @username)
     elif context.args:
         arg = context.args[0].strip()
+        arg = arg.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
         if arg.isdigit(): target_id = arg
         else: target_username = arg if arg.startswith('@') else f"@{arg}"
 
@@ -299,7 +324,6 @@ async def check_penipu(update: Update, context: CallbackContext):
     if target_id == str(bot_me.id) or target_username == f"@{bot_me.username}":
         return await update.message.reply_text("❌ Tidak bisa mengecek bot atau channel.")
 
-    # ---> PESAN LOADING DIKIRIM INSTAN DI SINI <---
     loading_msg = await update.message.reply_text("⏳ Mengumpulkan data target...", parse_mode="HTML")
 
     try:
@@ -309,7 +333,8 @@ async def check_penipu(update: Update, context: CallbackContext):
         elif target_username and not target_id:
             entity = await userbot.get_entity(target_username)
             target_id = str(entity.id)
-    except Exception: pass
+    except Exception:
+        pass
 
     targets_to_search, display_targets = [], []
     if target_id:
@@ -320,8 +345,6 @@ async def check_penipu(update: Update, context: CallbackContext):
         display_targets.append(f"<code>{target_username}</code>")
 
     target_display = " & ".join(display_targets)
-
-    # Update loading text setelah dapet data ID/Usernamenya
     await loading_msg.edit_text(f"⏳ Melacak rekam jejak {target_display} di database...", parse_mode="HTML")
 
     channels = ["bantaipenip", "rekampenipu", "spillhnr", "jejak_penipu"]
@@ -336,12 +359,200 @@ async def check_penipu(update: Update, context: CallbackContext):
         reply_text = f"✅ {target_display} <b>belum ditemukan</b> di database otomatis kami.\n\n⚠️ Silakan buka dan cek ulang secara manual:"
         await loading_msg.edit_text(reply_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
 
+async def check_penipu(update: Update, context: CallbackContext):
+    await process_check_penipu(update, context)
+
 # ==========================================
 # MENFESS & NORMAL HANDLERS
 # ==========================================
 async def save_user(user_id, username):
-    try: supabase.table("users").upsert({"user_id": user_id, "username": username}, on_conflict=["user_id"]).execute()
+    try: await db(lambda: supabase.table("users").upsert({"user_id": user_id, "username": username}, on_conflict="user_id").execute())
     except Exception: pass
+
+
+def get_main_keyboard():
+    keyboard = [
+        [KeyboardButton("✅ Verifikasi Seller"), KeyboardButton("🔍 Check Penipu")],
+        [KeyboardButton("👤 Profile")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
+
+def get_cancel_keyboard():
+    return ReplyKeyboardMarkup([[KeyboardButton("❌ Cancel")]], resize_keyboard=True, is_persistent=True)
+
+
+def seller_form_template():
+    return (
+        "🧾 *FORM VERIFIKASI SELLER*\n\n"
+        "Silakan copy format di bawah, isi lengkap, lalu kirim kembali dalam *1 pesan*.\n\n"
+        "Username: @username_kamu\n"
+        "Channel BA: @channel / link channel BA yang dipegang\n"
+        "Testimoni: link atau rangkuman testimoni\n"
+        "Honest Review: link atau rangkuman honest review\n\n"
+        "Tekan ❌ Cancel untuk membatalkan."
+    )
+
+
+def parse_seller_form(text: str):
+    aliases = {
+        "username": "username",
+        "user": "username",
+        "channel": "channel_ba",
+        "channel ba": "channel_ba",
+        "ch ba": "channel_ba",
+        "ba": "channel_ba",
+        "testimoni": "testimoni",
+        "testimony": "testimoni",
+        "testi": "testimoni",
+        "honest review": "honest_review",
+        "honest": "honest_review",
+        "review": "honest_review",
+    }
+    labels = {
+        "username": "Username",
+        "channel_ba": "Channel BA",
+        "testimoni": "Testimoni",
+        "honest_review": "Honest Review",
+    }
+    data = {key: "" for key in labels}
+    current_key = None
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current_key and data[current_key]:
+                data[current_key] += "\n"
+            continue
+
+        match = re.match(r"^(username|user|channel\s*ba|ch\s*ba|channel|ba|testimoni|testimony|testi|honest\s*review|honest|review)\s*:\s*(.*)$", line, re.IGNORECASE)
+        if match:
+            raw_key = re.sub(r"\s+", " ", match.group(1).lower()).strip()
+            current_key = aliases.get(raw_key)
+            if current_key:
+                data[current_key] = match.group(2).strip()
+            continue
+
+        if current_key:
+            if data[current_key] and not data[current_key].endswith("\n"):
+                data[current_key] += "\n"
+            data[current_key] += line
+
+    data = {key: value.strip() for key, value in data.items()}
+    missing = [labels[key] for key, value in data.items() if not value]
+    return data, missing
+
+
+async def upsert_seller_verification(user_id: int, telegram_username: str, form_data: dict, status: str, admin_id: int = None):
+    """Simpan status verifikasi jika tabel seller_verifications tersedia. Fitur utama tetap jalan walau tabel belum dibuat."""
+    payload = {
+        "user_id": user_id,
+        "telegram_username": telegram_username,
+        "form_username": form_data.get("username", ""),
+        "channel_ba": form_data.get("channel_ba", ""),
+        "testimoni": form_data.get("testimoni", ""),
+        "honest_review": form_data.get("honest_review", ""),
+        "status": status,
+    }
+    if admin_id is not None:
+        payload["admin_id"] = admin_id
+    try:
+        await db(lambda: supabase.table("seller_verifications").upsert(payload, on_conflict="user_id").execute())
+    except Exception as e:
+        logger.warning(f"seller_verifications tidak tersimpan/terupdate (opsional): {e}")
+
+
+async def update_seller_verification_status(user_id: int, status: str, admin_id: int = None):
+    payload = {"status": status}
+    if admin_id is not None:
+        payload["admin_id"] = admin_id
+    try:
+        await db(lambda: supabase.table("seller_verifications").update(payload).eq("user_id", user_id).execute())
+    except Exception as e:
+        logger.warning(f"Status seller_verifications tidak terupdate (opsional): {e}")
+
+
+async def get_seller_status(user_id: int):
+    try:
+        response = await db(lambda: supabase.table("seller_verifications").select("status").eq("user_id", user_id).execute())
+        if hasattr(response, "data") and response.data:
+            status = (response.data[-1].get("status") or "").lower()
+            if status == "approved":
+                return f"Terverifikasi ({SELLER_VERIFIED_TITLE})"
+            if status == "pending":
+                return "Menunggu review admin"
+            if status == "rejected":
+                return "Ditolak"
+    except Exception:
+        pass
+    return "Belum terverifikasi"
+
+
+async def cek_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    user = update.effective_user
+    await save_user(user.id, user.username)
+    seller_status = await get_seller_status(user.id)
+    username = f"@{user.username}" if user.username else "-"
+    await update.message.reply_text(
+        f"👤 <b>PROFILE KAMU</b>\n\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"👥 Username: {html.escape(username)}\n"
+        f"🏷️ Status Seller: <b>{html.escape(seller_status)}</b>",
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard()
+    )
+
+
+async def start_seller_verification(update: Update, context: CallbackContext):
+    if update.effective_chat.type != "private":
+        return
+    context.user_data["keyboard_state"] = KEYBOARD_STATE_VERIFY_SELLER
+    await update.message.reply_text(seller_form_template(), reply_markup=get_cancel_keyboard())
+
+
+async def submit_seller_verification(update: Update, context: CallbackContext):
+    user = update.effective_user
+    text = update.message.text or update.message.caption or ""
+    form_data, missing = parse_seller_form(text)
+
+    if missing:
+        await update.message.reply_text(
+            "❌ Form belum lengkap. Bagian yang kosong: " + ", ".join(missing) + "\n\n" + seller_form_template(),
+            reply_markup=get_cancel_keyboard()
+        )
+        context.user_data["keyboard_state"] = KEYBOARD_STATE_VERIFY_SELLER
+        return
+
+    display_name = f"@{user.username}" if user.username else user.first_name
+    await upsert_seller_verification(user.id, user.username, form_data, "pending")
+
+    admin_text = (
+        "🧾 <b>PENGAJUAN VERIFIKASI SELLER</b>\n\n"
+        f"👤 Pengirim: {html.escape(display_name)}\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"🔗 Username Telegram: {html.escape('@' + user.username if user.username else '-')}\n\n"
+        "📌 <b>Data Form</b>\n"
+        f"<b>Username:</b> {html.escape(form_data['username'])}\n"
+        f"<b>Channel BA:</b> {html.escape(form_data['channel_ba'])}\n"
+        f"<b>Testimoni:</b> {html.escape(form_data['testimoni'])}\n"
+        f"<b>Honest Review:</b> {html.escape(form_data['honest_review'])}"
+    )
+    keyboard = [[
+        InlineKeyboardButton("✅ Setujui", callback_data=f"seller|A|{user.id}"),
+        InlineKeyboardButton("❌ Tolak", callback_data=f"seller|R|{user.id}"),
+    ]]
+
+    try:
+        await context.bot.send_message(chat_id=ADMIN_GROUP_ID, text=admin_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "✅ Form verifikasi seller kamu sudah dikirim ke admin. Mohon tunggu hasil review ya.",
+            reply_markup=get_main_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Gagal mengirim form verifikasi seller ke admin: {e}")
+        await update.message.reply_text("❌ Gagal mengirim form ke admin. Silakan coba lagi nanti.", reply_markup=get_main_keyboard())
 
 async def start(update: Update, context: CallbackContext):
     if update.effective_chat.type != "private": return
@@ -355,7 +566,7 @@ async def start(update: Update, context: CallbackContext):
             "𔐼 *Bazarfess:* [@bazarfess](https://t.me/bazarfess)\n"
             "𔐼 *LPM Bazar:* [@lpmbazar](https://t.me/lpmbazar)\n"
             "𔐼 *Info Base:* [@rekapbazar](https://t.me/rekapbazar)\n\n"
-            "Ketuk /menu untuk menampilkan navigasi", parse_mode="Markdown"
+            "Ketuk /menu untuk menampilkan navigasi", parse_mode="Markdown", reply_markup=get_main_keyboard()
         )
     else:
         keyboard = [[InlineKeyboardButton("Join Channels", url=f"https://t.me/{c[1:]}")] for c in required_channels]
@@ -363,6 +574,7 @@ async def start(update: Update, context: CallbackContext):
 
 async def handle_pesan(update: Update, context: CallbackContext):
     global bot_active, MENFESS_MODE
+    if not update.effective_user or not update.message: return
     if update.effective_chat.type != "private": return
     if not bot_active: return await update.message.reply_text("Bot sedang dipause oleh admin.")
     user_id = update.effective_user.id
@@ -394,6 +606,45 @@ async def handle_pesan(update: Update, context: CallbackContext):
 
     text_content = (update.message.text or update.message.caption or "").strip()
     text_content_lower = text_content.lower()
+
+    if update.message.text == "❌ Cancel":
+        context.user_data.pop("keyboard_state", None)
+        return await update.message.reply_text("✅ Aksi dibatalkan. Kembali ke menu utama.", reply_markup=get_main_keyboard())
+
+    keyboard_state = context.user_data.get("keyboard_state")
+    if keyboard_state == KEYBOARD_STATE_VERIFY_SELLER:
+        context.user_data.pop("keyboard_state", None)
+        if not update.message.text:
+            context.user_data["keyboard_state"] = KEYBOARD_STATE_VERIFY_SELLER
+            return await update.message.reply_text("❌ Form verifikasi harus dikirim dalam bentuk teks.", reply_markup=get_cancel_keyboard())
+        await submit_seller_verification(update, context)
+        return
+
+    if keyboard_state == KEYBOARD_STATE_CHECK_PENIPU:
+        context.user_data.pop("keyboard_state", None)
+        if not text_content:
+            return await update.message.reply_text("❌ Target tidak boleh kosong.", reply_markup=get_main_keyboard())
+        await process_check_penipu(update, context, raw_target=text_content)
+        await update.message.reply_text("✅ Pengecekan selesai. Kembali ke menu utama.", reply_markup=get_main_keyboard())
+        return
+
+    if update.message.text and "verifikasi seller" in text_content_lower:
+        await start_seller_verification(update, context)
+        return
+
+    if update.message.text and "check penipu" in text_content_lower:
+        context.user_data["keyboard_state"] = KEYBOARD_STATE_CHECK_PENIPU
+        await update.message.reply_text(
+            "🔍 *Check Penipu*\n\nKetik ID atau username target. Contoh: `@username` atau `123456789`.",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+
+    if update.message.text and ("profile" in text_content_lower or "profil" in text_content_lower):
+        await cek_profile(update, context)
+        return
+
     is_direct_forward = any(ht.lower() in text_content_lower for ht in CACHE_HASHTAGS)
 
     text_without_hashtag = text_content
@@ -431,7 +682,7 @@ async def handle_pesan(update: Update, context: CallbackContext):
 
                 keyboard = [[InlineKeyboardButton("Lihat Pesan Kamu", url=f"https://t.me/{CHANNEL_ID[1:]}/{message_sent.message_id}")]]
                 await update.message.reply_text("Pesan kamu telah dikirim ke channel! 🪶\n\nJangan lupa kepoin channel base ya!", reply_markup=InlineKeyboardMarkup(keyboard))
-                try: supabase.table("menfess_map").insert({"post_id": message_sent.message_id, "sender_user_id": user_id}).execute()
+                try: await db(lambda: supabase.table("menfess_map").insert({"post_id": message_sent.message_id, "sender_user_id": user_id}).execute())
                 except Exception: pass
 
                 log_msg = f"📌 Log Menfess (AUTO):\n🕰️ Waktu: {update.message.date}\n👤 Pengirim: {display_name}\n🆔 ID: `{user_id}`"
@@ -462,6 +713,51 @@ async def handle_pesan(update: Update, context: CallbackContext):
 async def handle_callback_review(update: Update, context: CallbackContext):
     query = update.callback_query
     data = query.data
+
+    if data.startswith("seller|"):
+        await query.answer()
+        try:
+            _, action, raw_user_id = data.split("|", 2)
+            user_id = int(raw_user_id)
+        except Exception:
+            return await query.edit_message_text(f"{query.message.text}\n\n❌ STATUS: CALLBACK TIDAK VALID")
+
+        admin_id = update.effective_user.id if update.effective_user else None
+
+        if action == "A":
+            try:
+                await context.bot.set_chat_member_tag(
+                    chat_id=GROUP_ID_DISKUSI,
+                    user_id=user_id,
+                    tag=SELLER_VERIFIED_TITLE
+                )
+                await update_seller_verification_status(user_id, "approved", admin_id=admin_id)
+                await query.edit_message_text(f"{query.message.text}\n\n✅ STATUS: DISETUJUI\n🏷️ Title komentar: {SELLER_VERIFIED_TITLE}")
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ Verifikasi seller kamu disetujui! Title komentar kamu sekarang: {SELLER_VERIFIED_TITLE}",
+                    reply_markup=get_main_keyboard()
+                )
+            except Exception as e:
+                logger.error(f"Gagal approve verifikasi seller {user_id}: {e}")
+                await query.edit_message_text(
+                    f"{query.message.text}\n\n❌ STATUS: GAGAL DISETUJUI\nGagal mengubah title. Pastikan bot punya izin Manage Tags/Kelola Peran Anggota dan user sudah join grup diskusi."
+                )
+            return
+
+        if action == "R":
+            await update_seller_verification_status(user_id, "rejected", admin_id=admin_id)
+            await query.edit_message_text(f"{query.message.text}\n\n❌ STATUS: DITOLAK")
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="❌ Maaf, verifikasi seller kamu ditolak oleh admin. Silakan lengkapi/benahi data lalu ajukan ulang.",
+                    reply_markup=get_main_keyboard()
+                )
+            except Exception:
+                pass
+            return
+
     if data.startswith("mf|"):
         await query.answer()
         parts = data.split("|")
@@ -480,7 +776,7 @@ async def handle_callback_review(update: Update, context: CallbackContext):
                 if not comsect_on: CACHE_COMSECT_OFF.add(sent_msg.message_id)
                 log_msg = f"📌 Log Menfess (Manual Approved):\n🆔 Pengirim ID: `{user_id}`\n⚙️ Comsect: {'ON' if comsect_on else 'OFF'}"
                 await context.bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="Markdown")
-                try: supabase.table("menfess_map").insert({"post_id": sent_msg.message_id, "sender_user_id": user_id}).execute()
+                try: await db(lambda: supabase.table("menfess_map").insert({"post_id": sent_msg.message_id, "sender_user_id": user_id}).execute())
                 except Exception: pass
 
                 await query.edit_message_text(f"{query.message.text}\n\n✅ *STATUS: {status_text}*", parse_mode="Markdown")
@@ -505,7 +801,7 @@ async def handle_admin_reply(update: Update, context: CallbackContext):
 
     if reply_text and reply_text.startswith("/"):
         try:
-            response = supabase.table("commands").select("content").eq("name", reply_text.split()[0]).execute()
+            response = await db(lambda: supabase.table("commands").select("content").eq("name", reply_text.split()[0]).execute())
             if hasattr(response, 'data') and response.data:
                 await context.bot.send_message(chat_id=user_id, text=response.data[0]["content"], parse_mode="Markdown")
                 notif = await update.message.reply_text(f"✅ Command dikirim ke user {user_id}")
@@ -537,7 +833,7 @@ async def handle_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         origin_chat = msg.forward_origin.chat
         if origin_chat.username and ("@" + origin_chat.username.lower() == CHANNEL_ID.lower()):
-            try: supabase.table("menfess_map").update({"discussion_message_id": msg.message_id}).eq("post_id", post_id).execute()
+            try: await db(lambda: supabase.table("menfess_map").update({"discussion_message_id": msg.message_id}).eq("post_id", post_id).execute())
             except Exception: pass
 
             warning_rekber = (
@@ -554,7 +850,7 @@ async def handle_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.reply_to_message and msg.from_user.id != context.bot.id:
         try:
             replied_msg_id = msg.reply_to_message.message_id
-            response = supabase.table("menfess_map").select("sender_user_id, post_id").eq("discussion_message_id", replied_msg_id).execute()
+            response = await db(lambda: supabase.table("menfess_map").select("sender_user_id, post_id").eq("discussion_message_id", replied_msg_id).execute())
             if hasattr(response, 'data') and response.data:
                 sender_user_id, post_id = response.data[0]["sender_user_id"], response.data[0]["post_id"]
                 commenter = f"{msg.from_user.first_name} (@{msg.from_user.username})" if msg.from_user.username else msg.from_user.first_name
@@ -571,12 +867,16 @@ async def open_bot(update: Update, context: CallbackContext):
     global bot_active
     if update.effective_chat.id == ADMIN_GROUP_ID:
         bot_active = True
+        try: await db(lambda: supabase.table("bot_settings").upsert({"key": "bot_active", "value": "true"}).execute())
+        except Exception as e: logger.error(f"Gagal menyimpan status bot_active: {e}")
         await update.message.reply_text("✅ Bot telah diaktifkan kembali.")
 
 async def close_bot(update: Update, context: CallbackContext):
     global bot_active
     if update.effective_chat.id == ADMIN_GROUP_ID:
         bot_active = False
+        try: await db(lambda: supabase.table("bot_settings").upsert({"key": "bot_active", "value": "false"}).execute())
+        except Exception as e: logger.error(f"Gagal menyimpan status bot_active: {e}")
         await update.message.reply_text("⏸️ Bot telah dipause.")
 
 async def get_group_id(update: Update, context: CallbackContext):
@@ -584,7 +884,7 @@ async def get_group_id(update: Update, context: CallbackContext):
 
 async def get_all_user_ids():
     try:
-        response = supabase.table("users").select("user_id").execute()
+        response = await db(lambda: supabase.table("users").select("user_id").execute())
         return [row["user_id"] for row in response.data] if hasattr(response, "data") and response.data else []
     except Exception: return []
 
@@ -639,23 +939,29 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_msg.edit_text(f"✅ *Broadcast Selesai!*\n👥 Total Target: {total_users}\n✅ Berhasil: {sc}\n❌ Gagal: {fc}", parse_mode="Markdown")
 
 async def add_command(update: Update, context: CallbackContext) -> None:
+    if update.effective_chat.id != ADMIN_GROUP_ID:
+        return
     if update.message.reply_to_message:
-        command_name = context.args[0] if context.args else None
-        command_content = update.message.reply_to_message.text
+        if not context.args:
+            return await update.message.reply_text("Format (reply): /addcommand <nama>")
+        command_name = context.args[0]
+        command_content = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
     else:
         if len(context.args) < 2: return await update.message.reply_text("Format: /addcommand <nama> <isi>")
         command_name, command_content = context.args[0], " ".join(context.args[1:])
     command_name = command_name if command_name.startswith("/") else "/" + command_name
     try:
-        supabase.table("commands").upsert({"name": command_name, "content": command_content}).execute()
+        await db(lambda: supabase.table("commands").upsert({"name": command_name, "content": command_content}).execute())
         await update.message.reply_text(f"✅ `{command_name}` disimpan!", parse_mode='Markdown')
     except Exception: await update.message.reply_text("❌ Gagal.")
 
 async def delete_command(update: Update, context: CallbackContext) -> None:
+    if update.effective_chat.id != ADMIN_GROUP_ID:
+        return
     if not context.args: return await update.message.reply_text("Format: /deletecommand <nama>")
     command_name = context.args[0] if context.args[0].startswith("/") else "/" + context.args[0]
     try:
-        supabase.table("commands").delete().eq("name", command_name).execute()
+        await db(lambda: supabase.table("commands").delete().eq("name", command_name).execute())
         await update.message.reply_text(f"✅ `{command_name}` dihapus!", parse_mode='Markdown')
     except Exception: await update.message.reply_text("❌ Gagal.")
 
@@ -665,7 +971,7 @@ async def settings(update: Update, context: CallbackContext):
     hashtags_text = "\n".join([f"𔐼 `{h}`" for h in CACHE_HASHTAGS]) if CACHE_HASHTAGS else "–"
     global MENFESS_MODE
     try:
-        response = supabase.table("commands").select("name, content").execute()
+        response = await db(lambda: supabase.table("commands").select("name, content").execute())
         commands_text = "\n\n".join([f"*{c['name']}*\n{c['content']}" for c in response.data]) if hasattr(response, 'data') and response.data else "–"
     except Exception: commands_text = "– Error –"
 
@@ -685,7 +991,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 # FUNGSI MAIN (PENTING: SEMUA HANDLER DIGABUNG)
 # ==========================================
 def main():
-    application = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(on_startup).concurrent_updates(True).build()
 
     # Commands admin Base
     application.add_handler(CommandHandler('block', block_user))
@@ -699,6 +1005,8 @@ def main():
     # Fitur Utama
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('menu', menu))
+    application.add_handler(CommandHandler(['profile', 'profil'], cek_profile))
+    application.add_handler(CommandHandler(['verifseller', 'verifikasi_seller'], start_seller_verification))
     application.add_handler(CommandHandler('open', open_bot))
     application.add_handler(CommandHandler('close', close_bot))
     application.add_handler(CommandHandler('grupid', get_group_id))
