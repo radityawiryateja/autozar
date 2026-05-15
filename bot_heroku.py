@@ -496,11 +496,9 @@ async def cek_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await save_user(user.id, user.username)
     seller_status = await get_seller_status(user.id)
-    username = f"@{user.username}" if user.username else "-"
     await update.message.reply_text(
         f"👤 <b>PROFILE KAMU</b>\n\n"
         f"🆔 ID: <code>{user.id}</code>\n"
-        f"👥 Username: {html.escape(username)}\n"
         f"🏷️ Status Seller: <b>{html.escape(seller_status)}</b>",
         parse_mode="HTML",
         reply_markup=get_main_keyboard()
