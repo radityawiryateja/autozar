@@ -891,7 +891,7 @@ async def get_all_user_ids():
 async def menu(update: Update, context: CallbackContext):
     if update.effective_chat.type != "private": return
     menu_text = "𔐼 *Bazarfess:* [@bazarfess](https://t.me/bazarfess)\n𔐼 *LPM Bazar:* [@lpmbazar](https://t.me/lpmbazar)\n𔐼 *Info Base:* [@rekapbazar](https://t.me/rekapbazar)\n\n"
-    await update.message.reply_text(menu_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📜 Info Bazar", url="https://t.me/rekapbazar")]]))
+    await update.message.reply_text(menu_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_GROUP_ID or not context.args: return await update.message.reply_text("Format: /broadcastfw <link>")
