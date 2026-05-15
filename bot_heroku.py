@@ -384,12 +384,14 @@ def get_cancel_keyboard():
 
 def seller_form_template():
     return (
-        "🧾 *FORM VERIFIKASI SELLER*\n\n"
-        "Silakan copy format di bawah, isi lengkap, lalu kirim kembali dalam *1 pesan*.\n\n"
+        "🧾 FORM VERIFIKASI SELLER\n\n"
+        "Silakan copy format di bawah ini:\n\n"
+        "```\n"
         "Username: @username_kamu\n"
-        "Channel BA: @channel / link channel BA yang dipegang\n"
-        "Testimoni: link atau rangkuman testimoni\n"
-        "Honest Review: link atau rangkuman honest review\n\n"
+        "Channel BA: @channel\n"
+        "Testimoni: link testimoni\n"
+        "Honest Review: link review\n"
+        "```\n\n"
         "Tekan ❌ Cancel untuk membatalkan."
     )
 
@@ -509,7 +511,7 @@ async def start_seller_verification(update: Update, context: CallbackContext):
     if update.effective_chat.type != "private":
         return
     context.user_data["keyboard_state"] = KEYBOARD_STATE_VERIFY_SELLER
-    await update.message.reply_text(seller_form_template(), reply_markup=get_cancel_keyboard())
+    await update.message.reply_text(seller_form_template(), reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
 
 
 async def submit_seller_verification(update: Update, context: CallbackContext):
@@ -520,7 +522,7 @@ async def submit_seller_verification(update: Update, context: CallbackContext):
     if missing:
         await update.message.reply_text(
             "❌ Form belum lengkap. Bagian yang kosong: " + ", ".join(missing) + "\n\n" + seller_form_template(),
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_cancel_keyboard(), parse_mode="Markdown"
         )
         context.user_data["keyboard_state"] = KEYBOARD_STATE_VERIFY_SELLER
         return
