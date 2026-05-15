@@ -445,41 +445,20 @@ def parse_seller_form(text: str):
     return data, missing
 
 
-async def upsert_seller_verification(user_id: int, telegram_username: str, form_data: dict, status: str, admin_id: int = None):
-    """Simpan status verifikasi jika tabel seller_verifications tersedia. Fitur utama tetap jalan walau tabel belum dibuat."""
-    payload = {
-        "user_id": user_id,
-        "telegram_username": telegram_username,
-        "form_username": form_data.get("username", ""),
-        "channel_ba": form_data.get("channel_ba", ""),
-        "testimoni": form_data.get("testimoni", ""),
-        "honest_review": form_data.get("honest_review", ""),
-        "status": status,
-    }
-    if admin_id is not None:
-        payload["admin_id"] = admin_id
+async def set_user_seller_status(user_id: int, status: str):
+    """Update kolom seller_status di tabel users"""
     try:
-        await db(lambda: supabase.table("seller_verifications").upsert(payload, on_conflict="user_id").execute())
+        await db(lambda: supabase.table("users").update({"seller_status": status}).eq("user_id", user_id).execute())
     except Exception as e:
-        logger.warning(f"seller_verifications tidak tersimpan/terupdate (opsional): {e}")
-
-
-async def update_seller_verification_status(user_id: int, status: str, admin_id: int = None):
-    payload = {"status": status}
-    if admin_id is not None:
-        payload["admin_id"] = admin_id
-    try:
-        await db(lambda: supabase.table("seller_verifications").update(payload).eq("user_id", user_id).execute())
-    except Exception as e:
-        logger.warning(f"Status seller_verifications tidak terupdate (opsional): {e}")
-
+        logger.warning(f"Gagal update status seller di tabel users: {e}")
 
 async def get_seller_status(user_id: int):
+    """Ambil status dari tabel users"""
     try:
-        response = await db(lambda: supabase.table("seller_verifications").select("status").eq("user_id", user_id).execute())
+        response = await db(lambda: supabase.table("users").select("seller_status").eq("user_id", user_id).execute())
         if hasattr(response, "data") and response.data:
-            status = (response.data[-1].get("status") or "").lower()
-            if status == "approved":
+            status = (response.data[0].get("seller_status") or "non-seller").lower()
+            if status == "verified":
                 return f"Terverifikasi ({SELLER_VERIFIED_TITLE})"
             if status == "pending":
                 return "Menunggu review admin"
@@ -487,7 +466,7 @@ async def get_seller_status(user_id: int):
                 return "Ditolak"
     except Exception:
         pass
-    return "Belum terverifikasi"
+    return "Non-Seller"
 
 
 async def cek_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -526,7 +505,9 @@ async def submit_seller_verification(update: Update, context: CallbackContext):
         return
 
     display_name = f"@{user.username}" if user.username else user.first_name
-    await upsert_seller_verification(user.id, user.username, form_data, "pending")
+    
+    # Hanya ubah statusnya di tabel users menjadi pending, tanpa save data form
+    await set_user_seller_status(user.id, "pending")
 
     admin_text = (
         "🧾 <b>PENGAJUAN VERIFIKASI SELLER</b>\n\n"
@@ -731,7 +712,7 @@ async def handle_callback_review(update: Update, context: CallbackContext):
                     user_id=user_id,
                     tag=SELLER_VERIFIED_TITLE
                 )
-                await update_seller_verification_status(user_id, "approved", admin_id=admin_id)
+                await set_user_seller_status(user_id, "verified")
                 await query.edit_message_text(f"{query.message.text}\n\n✅ STATUS: DISETUJUI\n🏷️ Title komentar: {SELLER_VERIFIED_TITLE}")
                 await context.bot.send_message(
                     chat_id=user_id,
@@ -746,7 +727,7 @@ async def handle_callback_review(update: Update, context: CallbackContext):
             return
 
         if action == "R":
-            await update_seller_verification_status(user_id, "rejected", admin_id=admin_id)
+            await set_user_seller_status(user_id, "rejected")
             await query.edit_message_text(f"{query.message.text}\n\n❌ STATUS: DITOLAK")
             try:
                 await context.bot.send_message(
