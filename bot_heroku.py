@@ -44,6 +44,8 @@ MENFESS_MODE = "auto"
 SELLER_VERIFIED_TITLE = os.getenv("SELLER_VERIFIED_TITLE", "verified 🫆")
 KEYBOARD_STATE_VERIFY_SELLER = "WAITING_SELLER_VERIFICATION_FORM"
 KEYBOARD_STATE_CHECK_PENIPU = "WAITING_CHECK_PENIPU_TARGET"
+KEYBOARD_STATE_RADAR_ADD = "WAITING_RADAR_ADD"
+KEYBOARD_STATE_RADAR_REMOVE = "WAITING_RADAR_REMOVE"
 
 try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -416,10 +418,16 @@ async def save_user(user_id, username):
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton("✅ Verifikasi Seller"), KeyboardButton("🔍 Check Penipu")],
-        [KeyboardButton("👤 Profile")],
+        [KeyboardButton("📡 Radar Incaran"), KeyboardButton("👤 Profile")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
+def get_radar_keyboard():
+    keyboard = [
+        [KeyboardButton("➕ Tambah Radar"), KeyboardButton("➖ Hapus Radar")],
+        [KeyboardButton("📋 List Radar"), KeyboardButton("❌ Cancel")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 def get_cancel_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("❌ Cancel")]], resize_keyboard=True, is_persistent=True)
@@ -658,7 +666,71 @@ async def handle_pesan(update: Update, context: CallbackContext):
         context.user_data.pop("keyboard_state", None)
         return await update.message.reply_text("✅ Aksi dibatalkan. Kembali ke menu utama.", reply_markup=get_main_keyboard())
 
+    if text_content == "📡 Radar Incaran":
+        return await update.message.reply_text(
+            "📡 *Smart Radar Kitheons*\n\n"
+            "Pilih menu di bawah ini untuk mengatur radar incaranmu:", 
+            parse_mode="Markdown",
+            reply_markup=get_radar_keyboard()
+        )
+        
+    if text_content == "📋 List Radar":
+        response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
+        keywords = [r['keyword'] for r in response.data] if hasattr(response, 'data') and response.data else []
+        if not keywords: 
+            return await update.message.reply_text("Kamu belum punya keyword radar incaran.", reply_markup=get_radar_keyboard())
+        return await update.message.reply_text(f"📡 *Radar Incaranmu:*\n- " + "\n- ".join(keywords), parse_mode="Markdown", reply_markup=get_radar_keyboard())
+        
+    if text_content == "➕ Tambah Radar":
+        context.user_data["keyboard_state"] = KEYBOARD_STATE_RADAR_ADD
+        return await update.message.reply_text(
+            "Ketik *satu keyword* barang incaran yang ingin ditambahkan ke radar (Maks 10 keyword).\n\n"
+            "Contoh: `netflix`",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+        
+    if text_content == "➖ Hapus Radar":
+        context.user_data["keyboard_state"] = KEYBOARD_STATE_RADAR_REMOVE
+        return await update.message.reply_text(
+            "Ketik keyword radar yang ingin dihapus.\n\n"
+            "(_Cek 📋 List Radar dulu jika kamu lupa ejaannya_)",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+
     keyboard_state = context.user_data.get("keyboard_state")
+
+    if keyboard_state == KEYBOARD_STATE_RADAR_ADD:
+        context.user_data.pop("keyboard_state", None)
+        keyword = text_content.lower()
+        
+        # Cek limitasi 10 keyword
+        response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
+        current_kws = [r['keyword'].lower() for r in response.data] if hasattr(response, 'data') and response.data else []
+        
+        if len(current_kws) >= 10:
+            return await update.message.reply_text("❌ Batas maksimal radar adalah 10 keyword!", reply_markup=get_radar_keyboard())
+        if keyword in current_kws:
+            return await update.message.reply_text("⚠️ Keyword tersebut sudah ada di radarmu.", reply_markup=get_radar_keyboard())
+            
+        try:
+            await db(lambda: supabase.table("user_radars").insert({"user_id": user_id, "keyword": keyword}).execute())
+            await update_radar_cache() # Segarkan cache di RAM
+            return await update.message.reply_text(f"✅ Keyword `{keyword}` berhasil ditambahkan ke radar!", parse_mode="Markdown", reply_markup=get_radar_keyboard())
+        except Exception:
+            return await update.message.reply_text("❌ Gagal menyimpan radar.", reply_markup=get_radar_keyboard())
+
+    if keyboard_state == KEYBOARD_STATE_RADAR_REMOVE:
+        context.user_data.pop("keyboard_state", None)
+        keyword = text_content.lower()
+        try:
+            await db(lambda: supabase.table("user_radars").delete().eq("user_id", user_id).eq("keyword", keyword).execute())
+            await update_radar_cache() # Segarkan cache di RAM
+            return await update.message.reply_text(f"🗑️ Keyword `{keyword}` dihapus dari radar!", parse_mode="Markdown", reply_markup=get_radar_keyboard())
+        except Exception:
+            return await update.message.reply_text("❌ Gagal menghapus radar.", reply_markup=get_radar_keyboard())
+    
     if keyboard_state == KEYBOARD_STATE_VERIFY_SELLER:
         context.user_data.pop("keyboard_state", None)
         if not update.message.text:
@@ -917,60 +989,6 @@ async def handle_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=sender_user_id, text=notif_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Lihat Balasan", url=link)]]), parse_mode="Markdown")
         except Exception: pass
 
-async def manage_radar(update: Update, context: CallbackContext):
-    if update.effective_chat.type != "private": return
-    user_id = update.effective_user.id
-    args = context.args
-
-    if not args:
-        return await update.message.reply_text(
-            "📡 *Smart Radar*\n\nDapatkan notif otomatis jika ada barang incaranmu yang lewat di base!\n\n"
-            "Format:\n"
-            "➕ `/radar add <keyword>` (Contoh: `/radar add netflix`)\n"
-            "➖ `/radar remove <keyword>`\n"
-            "📋 `/radar list`", 
-            parse_mode="Markdown"
-        )
-
-    action = args[0].lower()
-    
-    if action == "list":
-        response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
-        keywords = [r['keyword'] for r in response.data] if hasattr(response, 'data') and response.data else []
-        if not keywords: 
-            return await update.message.reply_text("Kamu belum punya keyword radar incaran.")
-        return await update.message.reply_text(f"📡 *Radar Incaranmu:*\n- " + "\n- ".join(keywords), parse_mode="Markdown")
-
-    if len(args) < 2: 
-        return await update.message.reply_text(f"❌ Format: `/radar {action} <keyword>`", parse_mode="Markdown")
-    
-    keyword = " ".join(args[1:]).lower()
-
-    if action == "add":
-        # Check current keywords for limit
-        response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
-        current_kws = [r['keyword'].lower() for r in response.data] if hasattr(response, 'data') and response.data else []
-        
-        if len(current_kws) >= 10:
-            return await update.message.reply_text("❌ Batas maksimal radar adalah 10 keyword!")
-        if keyword in current_kws:
-            return await update.message.reply_text("⚠️ Keyword tersebut sudah ada di radarmu.")
-        
-        try:
-            await db(lambda: supabase.table("user_radars").insert({"user_id": user_id, "keyword": keyword}).execute())
-            await update_radar_cache() # Segarkan cache di RAM
-            await update.message.reply_text(f"✅ Keyword `{keyword}` berhasil ditambahkan ke radar!", parse_mode="Markdown")
-        except Exception as e:
-            await update.message.reply_text("❌ Gagal menyimpan radar.")
-            
-    elif action in ["remove", "del", "delete"]:
-        try:
-            await db(lambda: supabase.table("user_radars").delete().eq("user_id", user_id).eq("keyword", keyword).execute())
-            await update_radar_cache() # Segarkan cache di RAM
-            await update.message.reply_text(f"🗑️ Keyword `{keyword}` dihapus dari radar!", parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text("❌ Gagal menghapus radar.")
-
 async def open_bot(update: Update, context: CallbackContext):
     global bot_active
     if update.effective_chat.id == ADMIN_GROUP_ID:
@@ -1082,6 +1100,46 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=f"📄 Terdapat {len(failed_users)} user yang gagal menerima pesan broadcast."
         )
 
+async def push_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_GROUP_ID: return
+    
+    # Cek apakah ada teks yang diketik setelah command
+    if not context.args: 
+        return await update.message.reply_text("⚠️ Format salah! Gunakan: `/pushkeyboard <teks pesan>`\nContoh: `/pushkeyboard 🚀 Ada update menu baru nih, cek di bawah ya!`", parse_mode="Markdown")
+        
+    # Gabungkan semua kata setelah command menjadi satu string
+    info_text = " ".join(context.args)
+    
+    user_list = await get_all_user_ids()
+    total_users = len(user_list)
+    if total_users == 0: return await update.message.reply_text("⚠️ Tidak ada user di database untuk diupdate.")
+
+    sc, fc = 0, 0
+    status_msg = await update.message.reply_text(f"⏳ *Memulai push update keyboard ke {total_users} user...*\nMohon tunggu ya!", parse_mode="Markdown")
+    
+    # Ambil layout keyboard terbaru
+    new_keyboard = get_main_keyboard()
+    
+    for i, user_id in enumerate(user_list, 1):
+        try:
+            # Kirim pesan notifikasi sekaligus memaksa client Telegram mereka merender ulang keyboard
+            await context.bot.send_message(
+                chat_id=user_id, 
+                text=info_text,
+                parse_mode="Markdown",
+                reply_markup=new_keyboard
+            )
+            sc += 1
+        except Exception: 
+            fc += 1
+            
+        if i % 20 == 0:
+            try: await status_msg.edit_text(f"⏳ *Sedang memproses update keyboard... ({i}/{total_users})*\n✅ Berhasil: {sc}\n❌ Gagal: {fc}", parse_mode="Markdown")
+            except Exception: pass
+        await asyncio.sleep(0.05)
+        
+    await status_msg.edit_text(f"✅ *Push Keyboard Selesai!*\n👥 Total Target: {total_users}\n✅ Berhasil diupdate: {sc}\n❌ Gagal (Bot diblokir): {fc}", parse_mode="Markdown")
+
 async def add_command(update: Update, context: CallbackContext) -> None:
     if update.effective_chat.id != ADMIN_GROUP_ID:
         return
@@ -1161,6 +1219,7 @@ def main():
     application.add_handler(CommandHandler("disablehashtag", disable_hashtag))
     application.add_handler(CommandHandler('broadcastfw', broadcast_forward))
     application.add_handler(CommandHandler('broadcast', broadcast))
+    application.add_handler(CommandHandler('pushkeyboard', push_keyboard))
     application.add_handler(CommandHandler("addcommand", add_command))
     application.add_handler(CommandHandler("deletecommand", delete_command))
     application.add_handler(CommandHandler("settings", settings))
