@@ -5,10 +5,11 @@ import html
 import markdown
 import os
 import asyncio
+import hashlib
 
 
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext, InlineQueryResultArticle, InputTextMessageContent
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions, InlineQueryHandler
 from supabase import create_client
 import os
 from telethon.sessions import StringSession
@@ -404,6 +405,86 @@ async def process_check_penipu(update: Update, context: CallbackContext, raw_tar
         reply_text = f"✅ {target_display} <b>belum ditemukan</b> di database otomatis kami.\n\n⚠️ Silakan buka dan cek ulang secara manual:"
         reply_text += note_tambahan
         await loading_msg.edit_text(reply_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+async def inline_query_check_penipu(update: Update, context: CallbackContext):
+    query = update.inline_query.query.strip()
+    
+    # Jika user belum mengetik apa-apa, jangan jalankan pencarian
+    if not query:
+        return
+
+    # 1. Parsing Target (Mengadopsi dari process_check_penipu)
+    arg_clean = query.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
+    
+    target_id = None
+    target_username = None
+    phone_variations = []
+    
+    num_only = re.sub(r'[^0-9+]', '', arg_clean)
+    if re.match(r'^(?:\+62|62|0)8[0-9]{6,13}$', num_only):
+        if num_only.startswith('+62'): core = num_only[3:]
+        elif num_only.startswith('62'): core = num_only[2:]
+        elif num_only.startswith('0'): core = num_only[1:]
+        phone_variations = [f"0{core}", f"+62{core}", f"62{core}"]
+    elif arg_clean.isdigit(): 
+        target_id = arg_clean
+    else: 
+        target_username = arg_clean if arg_clean.startswith('@') else f"@{arg_clean}"
+
+    targets_to_search, display_targets = [], []
+    
+    if target_id:
+        targets_to_search.append(target_id)
+        display_targets.append(f"<code>{target_id}</code>")
+    if target_username:
+        targets_to_search.append(target_username)
+        display_targets.append(f"<code>{target_username}</code>")
+    if phone_variations:
+        targets_to_search.extend(phone_variations)
+        display_targets.extend([f"<code>{p}</code>" for p in phone_variations])
+
+    target_display = " & ".join(display_targets)
+
+    # 2. Eksekusi Pencarian menggunakan Userbot Telethon
+    channels = ["bantaipenip", "rekampenipu", "spillhnr", "jejak_penipu"]
+    found_posts = await search_with_userbot(targets_to_search, channels)
+
+    note_tambahan = ""
+    if phone_variations:
+        note_tambahan = "\n\n📝 <b>Note:</b> untuk pengecheckan via nomer wajib waspada, kadang penipu berganti ganti payment."
+
+    # 3. Format Hasil untuk Inline Mode
+    if found_posts:
+        teks_hasil = f"⚠️ <b>PERHATIAN!</b> Rekam jejak {target_display} <b>DITEMUKAN</b> di database.\n\nKemungkinan yang bersangkutan adalah pelaku/korban penipuan:\n"
+        for link in found_posts: 
+            teks_hasil += f"𔐼 {link}\n"
+        teks_hasil += note_tambahan
+        
+        title_hasil = "⚠️ TARGET DITEMUKAN!"
+        desc_hasil = f"Ada rekam jejak untuk {query}. Tap untuk mengirim hasil."
+    else:
+        teks_hasil = f"✅ {target_display} <b>belum ditemukan</b> di database otomatis kami.\n\n⚠️ Silakan buka dan cek ulang secara manual di @bantaipenip, @rekampenipu, @spillhnr, @jejak_penipu."
+        teks_hasil += note_tambahan
+        
+        title_hasil = "✅ Target Aman (Belum Ditemukan)"
+        desc_hasil = f"Tidak ada data otomatis untuk {query}."
+
+    # 4. Kirim kembalian Inline Result
+    results = [
+        InlineQueryResultArticle(
+            id=hashlib.md5(query.encode()).hexdigest(),
+            title=title_hasil,
+            description=desc_hasil,
+            input_message_content=InputTextMessageContent(
+                message_text=teks_hasil,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        )
+    ]
+    
+    # Jawab query inline (cache_time diset rendah agar data selalu fresh)
+    await update.inline_query.answer(results, cache_time=10)
 
 async def check_penipu(update: Update, context: CallbackContext):
     await process_check_penipu(update, context)
@@ -1276,8 +1357,9 @@ def main():
     application.add_handler(CommandHandler("deletecommand", delete_command))
     application.add_handler(CommandHandler("settings", settings))
 
-  # Ini dia handler fitur barunya (Check Penipu)
+    # Handler fitur (Check Penipu)
     application.add_handler(CommandHandler("check", check_penipu))
+    application.add_handler(InlineQueryHandler(inline_query_check_penipu))
 
     # Message & Callback Handlers
     application.add_handler(CallbackQueryHandler(handle_callback_review))
