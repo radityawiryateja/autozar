@@ -621,7 +621,7 @@ async def trigger_radar_notifications(context: CallbackContext, text_content: st
         try:
             await context.bot.send_message(
                 chat_id=uid, 
-                text=f"📡 *BINGO! Radar Incaranmu Berbunyi!*\n\nAda menfess baru yang cocok dengan keyword radarmu. Langsung sikat sebelum keduluan orang lain:\n{post_url}", 
+                text=f"📡 *BINGO! Radar Incaranmu Berbunyi!*\n{post_url}", 
                 parse_mode="Markdown"
             )
             await asyncio.sleep(0.05) # Jeda kecil menghindari flood limit Telegram
