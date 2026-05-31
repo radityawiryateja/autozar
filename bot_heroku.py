@@ -703,23 +703,55 @@ async def handle_pesan(update: Update, context: CallbackContext):
 
     if keyboard_state == KEYBOARD_STATE_RADAR_ADD:
         context.user_data.pop("keyboard_state", None)
-        keyword = text_content.lower()
         
-        # Cek limitasi 10 keyword
+        # Pisahkan input berdasarkan koma, ubah ke huruf kecil, dan hapus spasi berlebih
+        raw_keywords = [k.strip().lower() for k in text_content.split(',') if k.strip()]
+        
+        if not raw_keywords:
+            return await update.message.reply_text("❌ Keyword tidak boleh kosong.", reply_markup=get_radar_keyboard())
+
+        # Hilangkan duplikat dari ketikan user (misal dia ngetik "netflix, netflix")
+        new_keywords = []
+        for k in raw_keywords:
+            if k not in new_keywords:
+                new_keywords.append(k)
+
+        # Ambil keyword yang sudah ada di database
         response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
         current_kws = [r['keyword'].lower() for r in response.data] if hasattr(response, 'data') and response.data else []
         
-        if len(current_kws) >= 10:
-            return await update.message.reply_text("❌ Batas maksimal radar adalah 10 keyword!", reply_markup=get_radar_keyboard())
-        if keyword in current_kws:
-            return await update.message.reply_text("⚠️ Keyword tersebut sudah ada di radarmu.", reply_markup=get_radar_keyboard())
-            
-        try:
-            await db(lambda: supabase.table("user_radars").insert({"user_id": user_id, "keyword": keyword}).execute())
-            await update_radar_cache() # Segarkan cache di RAM
-            return await update.message.reply_text(f"✅ Keyword `{keyword}` berhasil ditambahkan ke radar!", parse_mode="Markdown", reply_markup=get_radar_keyboard())
-        except Exception:
-            return await update.message.reply_text("❌ Gagal menyimpan radar.", reply_markup=get_radar_keyboard())
+        # Saring keyword yang sebenarnya benar-benar baru (belum ada di database)
+        to_add = [k for k in new_keywords if k not in current_kws]
+        
+        if not to_add:
+            return await update.message.reply_text("⚠️ Semua keyword tersebut sudah ada di radarmu.", reply_markup=get_radar_keyboard())
+
+        # CEK TOTAL LIMIT (Hard Block jika melebihi 10)
+        if len(current_kws) + len(to_add) > 10:
+            return await update.message.reply_text(
+                f"❌ *Gagal menambahkan radar!*\n\n"
+                f"Limit maksimal adalah 10 keyword. Saat ini kamu sudah memiliki *{len(current_kws)}* keyword di database.\n\n"
+                f"Silakan hapus keyword lama terlebih dahulu menggunakan tombol ➖ *Hapus Radar*.",
+                parse_mode="Markdown",
+                reply_markup=get_radar_keyboard()
+            )
+        
+        added_kws = []
+        # Proses insert jika lolos limit
+        for kw in to_add:
+            try:
+                await db(lambda: supabase.table("user_radars").insert({"user_id": user_id, "keyword": kw}).execute())
+                added_kws.append(kw)
+            except Exception:
+                pass
+                
+        # Segarkan cache di RAM kalau ada yang berhasil ditambahkan
+        if added_kws:
+            await update_radar_cache() 
+            reply_msg = "✅ *Berhasil ditambahkan:*\n- " + "\n- ".join([f"`{k}`" for k in added_kws])
+            return await update.message.reply_text(reply_msg, parse_mode="Markdown", reply_markup=get_radar_keyboard())
+        else:
+            return await update.message.reply_text("❌ Terjadi kesalahan sistem saat menyimpan radar.", reply_markup=get_radar_keyboard())
 
     if keyboard_state == KEYBOARD_STATE_RADAR_REMOVE:
         context.user_data.pop("keyboard_state", None)
