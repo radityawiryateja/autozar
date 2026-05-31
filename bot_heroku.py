@@ -410,31 +410,59 @@ async def process_check_penipu(update: Update, context: CallbackContext, raw_tar
 
 async def inline_query_check_penipu(update: Update, context: CallbackContext):
     query = update.inline_query.query.strip()
-    
-    # Ambil user ID dari orang yang memanggil inline query
     user_id = update.inline_query.from_user.id
     
-    # Cek apakah dia sudah subs channel wajib
+    # 1. Cek Subscription Terlebih Dahulu
     if not await check_subscription(user_id, context):
+        dynamic_id = hashlib.md5(f"wajib_subs_{query}".encode()).hexdigest()
         hasil_tolak = [
             InlineQueryResultArticle(
-                id="wajib_subs",
+                id=dynamic_id,
                 title="🔒 Akses Ditolak (Belum Join Channel)",
                 description="Kamu harus join channel wajib dulu untuk pakai fitur ini.",
                 input_message_content=InputTextMessageContent(
-                    message_text="❌ <b>Akses Ditolak!</b>\nSaya tidak bisa menggunakan fitur ini karena belum join channel wajib dari @bazarfessbot.",
+                    message_text="❌ <b>Akses Ditolak!</b>\nSaya tidak bisa menggunakan fitur ini karena belum join channel wajib dari @bazarfess.",
                     parse_mode="HTML"
                 )
             )
         ]
-        # Kirim hasil penolakan (cache_time=0 agar kalau dia langsung join, bisa langsung coba lagi)
-        return await update.inline_query.answer(hasil_tolak, cache_time=0)
+        return await update.inline_query.answer(hasil_tolak, cache_time=0, is_personal=True)
 
-    # Jika user belum mengetik apa-apa, jangan jalankan pencarian
+    # 2. Jika user belum ngetik apa-apa, berikan panduan awal
     if not query:
-        return
+        panduan = [
+            InlineQueryResultArticle(
+                id="ketik_target",
+                title="🔍 Masukkan Target",
+                description="Ketik Username, ID, atau No HP target...",
+                input_message_content=InputTextMessageContent(
+                    message_text="ℹ️ Silakan ketik target (Username, ID, atau No HP) setelah memanggil bot.",
+                    parse_mode="HTML"
+                )
+            )
+        ]
+        return await update.inline_query.answer(panduan, cache_time=10, is_personal=True)
 
-    # 1. Parsing Target (Mengadopsi dari process_check_penipu)
+    # 3. Cegah bot mencari setiap kali user ngetik 1 huruf (Minimal 4 karakter)
+    if len(query) < 5:
+        tunggu = [
+            InlineQueryResultArticle(
+                id=hashlib.md5(f"tunggu_{query}".encode()).hexdigest(),
+                title="⏳ Lanjutkan mengetik...",
+                description="Ketik minimal 5 karakter agar bot mulai mencari.",
+                input_message_content=InputTextMessageContent(
+                    message_text="ℹ️ Target terlalu pendek. Ketik minimal 4 karakter.",
+                    parse_mode="HTML"
+                )
+            )
+        ]
+        return await update.inline_query.answer(tunggu, cache_time=10, is_personal=True)
+
+    # ==========================================
+    # --- LANJUTAN KODE PARSING & PENCARIAN ---
+    # ==========================================
+    
+    # 4. Parsing Target
     arg_clean = query.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
     
     target_id = None
@@ -466,7 +494,7 @@ async def inline_query_check_penipu(update: Update, context: CallbackContext):
 
     target_display = " & ".join(display_targets)
 
-    # 2. Eksekusi Pencarian menggunakan Userbot Telethon
+    # 5. Eksekusi Pencarian menggunakan Userbot Telethon
     channels = ["bantaipenip", "rekampenipu", "spillhnr", "jejak_penipu"]
     found_posts = await search_with_userbot(targets_to_search, channels)
 
@@ -474,7 +502,7 @@ async def inline_query_check_penipu(update: Update, context: CallbackContext):
     if phone_variations:
         note_tambahan = "\n\n📝 <b>Note:</b> untuk pengecheckan via nomer wajib waspada, kadang penipu berganti ganti payment."
 
-    # 3. Format Hasil untuk Inline Mode
+    # 6. Format Hasil untuk Inline Mode
     if found_posts:
         teks_hasil = f"⚠️ <b>PERHATIAN!</b> Rekam jejak {target_display} <b>DITEMUKAN</b> di database.\n\nKemungkinan yang bersangkutan adalah pelaku/korban penipuan:\n"
         for link in found_posts: 
@@ -490,7 +518,7 @@ async def inline_query_check_penipu(update: Update, context: CallbackContext):
         title_hasil = "✅ Target Aman (Belum Ditemukan)"
         desc_hasil = f"Tidak ada data otomatis untuk {query}."
 
-    # 4. Kirim kembalian Inline Result
+    # 7. Kirim kembalian Inline Result
     results = [
         InlineQueryResultArticle(
             id=hashlib.md5(query.encode()).hexdigest(),
@@ -499,12 +527,12 @@ async def inline_query_check_penipu(update: Update, context: CallbackContext):
             input_message_content=InputTextMessageContent(
                 message_text=teks_hasil,
                 parse_mode="HTML",
-                disable_web_page_preview=True
+                # Ini perbaikannya (sesuai library PTB terbaru yang kamu pakai):
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
         )
     ]
     
-    # Jawab query inline (cache_time diset rendah agar data selalu fresh)
     await update.inline_query.answer(results, cache_time=10)
 
 async def check_penipu(update: Update, context: CallbackContext):
