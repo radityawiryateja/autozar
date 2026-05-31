@@ -685,7 +685,7 @@ async def handle_pesan(update: Update, context: CallbackContext):
         context.user_data["keyboard_state"] = KEYBOARD_STATE_RADAR_ADD
         return await update.message.reply_text(
             "Ketik *satu keyword* barang incaran yang ingin ditambahkan ke radar (Maks 10 keyword).\n\n"
-            "Contoh: `netflix`",
+            "Contoh: `netflix, disney, hbo`",
             parse_mode="Markdown",
             reply_markup=get_cancel_keyboard()
         )
@@ -694,7 +694,7 @@ async def handle_pesan(update: Update, context: CallbackContext):
         context.user_data["keyboard_state"] = KEYBOARD_STATE_RADAR_REMOVE
         return await update.message.reply_text(
             "Ketik keyword radar yang ingin dihapus.\n\n"
-            "(_Cek 📋 List Radar dulu jika kamu lupa ejaannya_)",
+            "Contoh: `netflix, disney, hbo`",
             parse_mode="Markdown",
             reply_markup=get_cancel_keyboard()
         )
@@ -755,13 +755,32 @@ async def handle_pesan(update: Update, context: CallbackContext):
 
     if keyboard_state == KEYBOARD_STATE_RADAR_REMOVE:
         context.user_data.pop("keyboard_state", None)
-        keyword = text_content.lower()
-        try:
-            await db(lambda: supabase.table("user_radars").delete().eq("user_id", user_id).eq("keyword", keyword).execute())
-            await update_radar_cache() # Segarkan cache di RAM
-            return await update.message.reply_text(f"🗑️ Keyword `{keyword}` dihapus dari radar!", parse_mode="Markdown", reply_markup=get_radar_keyboard())
-        except Exception:
-            return await update.message.reply_text("❌ Gagal menghapus radar.", reply_markup=get_radar_keyboard())
+        
+        # Pisahkan input berdasarkan koma, ubah ke huruf kecil, dan hapus spasi berlebih
+        raw_keywords = [k.strip().lower() for k in text_content.split(',') if k.strip()]
+        
+        if not raw_keywords:
+            return await update.message.reply_text("❌ Keyword tidak boleh kosong.", reply_markup=get_radar_keyboard())
+
+        deleted_kws = []
+        
+        # Proses hapus satu per satu
+        for kw in raw_keywords:
+            try:
+                # Menggunakan default argument kw_local=kw pada lambda agar nilai kw tidak tertimpa di dalam loop
+                await db(lambda kw_local=kw: supabase.table("user_radars").delete().eq("user_id", user_id).eq("keyword", kw_local).execute())
+                if kw not in deleted_kws:
+                    deleted_kws.append(kw)
+            except Exception:
+                pass
+                
+        # Segarkan cache di RAM kalau ada yang dieksekusi
+        if deleted_kws:
+            await update_radar_cache() 
+            reply_msg = "🗑️ *Berhasil dihapus dari radar:*\n- " + "\n- ".join([f"`{k}`" for k in deleted_kws])
+            return await update.message.reply_text(reply_msg, parse_mode="Markdown", reply_markup=get_radar_keyboard())
+        else:
+            return await update.message.reply_text("❌ Terjadi kesalahan saat menghapus radar.", reply_markup=get_radar_keyboard())
     
     if keyboard_state == KEYBOARD_STATE_VERIFY_SELLER:
         context.user_data.pop("keyboard_state", None)
