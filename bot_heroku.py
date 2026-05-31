@@ -409,6 +409,25 @@ async def process_check_penipu(update: Update, context: CallbackContext, raw_tar
 async def inline_query_check_penipu(update: Update, context: CallbackContext):
     query = update.inline_query.query.strip()
     
+    # Ambil user ID dari orang yang memanggil inline query
+    user_id = update.inline_query.from_user.id
+    
+    # Cek apakah dia sudah subs channel wajib
+    if not await check_subscription(user_id, context):
+        hasil_tolak = [
+            InlineQueryResultArticle(
+                id="wajib_subs",
+                title="🔒 Akses Ditolak (Belum Join Channel)",
+                description="Kamu harus join channel wajib dulu untuk pakai fitur ini.",
+                input_message_content=InputTextMessageContent(
+                    message_text="❌ <b>Akses Ditolak!</b>\nSaya tidak bisa menggunakan fitur ini karena belum join channel wajib dari @bazarfessbot.",
+                    parse_mode="HTML"
+                )
+            )
+        ]
+        # Kirim hasil penolakan (cache_time=0 agar kalau dia langsung join, bisa langsung coba lagi)
+        return await update.inline_query.answer(hasil_tolak, cache_time=0)
+
     # Jika user belum mengetik apa-apa, jangan jalankan pencarian
     if not query:
         return
