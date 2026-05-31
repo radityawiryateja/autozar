@@ -7,9 +7,11 @@ import os
 import asyncio
 import hashlib
 
+from telegram.ext import InlineQueryHandler
+from telegram import InlineQueryResultArticle, InputTextMessageContent
 
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext, InlineQueryResultArticle, InputTextMessageContent
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions, InlineQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions
 from supabase import create_client
 import os
 from telethon.sessions import StringSession
