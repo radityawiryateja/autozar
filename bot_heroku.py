@@ -1226,7 +1226,6 @@ def main():
 
   # Ini dia handler fitur barunya (Check Penipu)
     application.add_handler(CommandHandler("check", check_penipu))
-    application.add_handler(CommandHandler("radar", manage_radar))
 
     # Message & Callback Handlers
     application.add_handler(CallbackQueryHandler(handle_callback_review))
