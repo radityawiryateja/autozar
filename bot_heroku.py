@@ -58,6 +58,7 @@ required_channels = []
 CACHE_BANNED_USERS = []
 CACHE_COMSECT_OFF = set()
 CACHE_BAD_WORDS = set()
+CACHE_RADAR = {}
 
 # ==========================================
 # NON-BLOCKING DATABASE HELPER
@@ -97,6 +98,21 @@ async def update_badwords_cache():
         response = await db(lambda: supabase.table("bad_words").select("word").execute())
         CACHE_BAD_WORDS = {row["word"].lower() for row in response.data} if hasattr(response, 'data') and response.data else set()
     except Exception as e: logger.error(f"Gagal memuat cache bad words: {e}")
+
+async def update_radar_cache():
+    global CACHE_RADAR
+    try:
+        response = await db(lambda: supabase.table("user_radars").select("user_id, keyword").execute())
+        new_cache = {}
+        if hasattr(response, 'data') and response.data:
+            for row in response.data:
+                kw = row['keyword'].lower()
+                if kw not in new_cache: 
+                    new_cache[kw] = set()
+                new_cache[kw].add(row['user_id'])
+        CACHE_RADAR = new_cache
+    except Exception as e: 
+        logger.error(f"Gagal memuat cache radar: {e}")
 
 async def update_required_channels_cache():
     global required_channels
@@ -280,16 +296,13 @@ async def search_with_userbot(targets: list, channels: list):
 async def process_check_penipu(update: Update, context: CallbackContext, raw_target: str = None):
     target_id = None
     target_username = None
+    phone_variations = []
+    arg_extracted = None
 
     # 1. Jika dipanggil dari tombol keyboard, target dibaca dari teks yang dikirim user.
     if raw_target:
-        arg = raw_target.strip()
-        arg = arg.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
-        if arg.isdigit():
-            target_id = arg
-        else:
-            target_username = arg if arg.startswith('@') else f"@{arg}"
-
+        arg_extracted = raw_target.strip()
+    
     # 2. PRIORITAS COMMAND: Cek apakah command ini me-reply sebuah pesan.
     elif update.message.reply_to_message:
         replied_msg = update.message.reply_to_message
@@ -308,16 +321,32 @@ async def process_check_penipu(update: Update, context: CallbackContext, raw_tar
             target_id = str(replied_msg.from_user.id)
             if replied_msg.from_user.username: target_username = f"@{replied_msg.from_user.username}"
 
-    # 3. Jika BUKAN reply pesan, baru baca teks setelah command (misal: /check @username)
+    # 3. Jika BUKAN reply pesan, baru baca teks setelah command (misal: /check @username atau 08xxx)
     elif context.args:
-        arg = context.args[0].strip()
-        arg = arg.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
-        if arg.isdigit(): target_id = arg
-        else: target_username = arg if arg.startswith('@') else f"@{arg}"
+        arg_extracted = context.args[0].strip()
+
+    # Eksekusi Parsing (Membedakan Username, ID, atau No HP)
+    if arg_extracted:
+        arg_clean = arg_extracted.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
+        
+        # Deteksi Nomer HP Indonesia (Awalan +62, 62, atau 08)
+        num_only = re.sub(r'[^0-9+]', '', arg_clean)
+        if re.match(r'^(?:\+62|62|0)8[0-9]{6,13}$', num_only):
+            # Ambil core angkanya saja setelah prefix
+            if num_only.startswith('+62'): core = num_only[3:]
+            elif num_only.startswith('62'): core = num_only[2:]
+            elif num_only.startswith('0'): core = num_only[1:]
+            
+            # Buat array variasi format nomor HP
+            phone_variations = [f"0{core}", f"+62{core}", f"62{core}"]
+        elif arg_clean.isdigit(): 
+            target_id = arg_clean
+        else: 
+            target_username = arg_clean if arg_clean.startswith('@') else f"@{arg_clean}"
 
     # Kalau nggak ada target yang valid
-    if not target_id and not target_username:
-        return await update.message.reply_text("❌ Gunakan format <code>/check &lt;id/username&gt;</code> atau <i>reply</i> pesan dengan <code>/check</code>", parse_mode="HTML")
+    if not target_id and not target_username and not phone_variations:
+        return await update.message.reply_text("❌ Gunakan format <code>/check &lt;id/username/nohp&gt;</code> atau <i>reply</i> pesan dengan <code>/check</code>", parse_mode="HTML")
 
     # Cegah kalau yang dilacak adalah bot atau channel kita sendiri
     bot_me = await context.bot.get_me()
@@ -326,6 +355,7 @@ async def process_check_penipu(update: Update, context: CallbackContext, raw_tar
 
     loading_msg = await update.message.reply_text("⏳ Mengumpulkan data target...", parse_mode="HTML")
 
+    # Resolve Username/ID ke entitas Telegram via Userbot (Lewati jika target berupa No HP)
     try:
         if target_id and not target_username:
             entity = await userbot.get_entity(int(target_id))
@@ -336,27 +366,40 @@ async def process_check_penipu(update: Update, context: CallbackContext, raw_tar
     except Exception:
         pass
 
+    # Gabungkan target yang akan di-search ke channel
     targets_to_search, display_targets = [], []
+    
     if target_id:
         targets_to_search.append(target_id)
         display_targets.append(f"<code>{target_id}</code>")
     if target_username:
         targets_to_search.append(target_username)
         display_targets.append(f"<code>{target_username}</code>")
+    if phone_variations:
+        targets_to_search.extend(phone_variations)
+        display_targets.extend([f"<code>{p}</code>" for p in phone_variations])
 
     target_display = " & ".join(display_targets)
     await loading_msg.edit_text(f"⏳ Melacak rekam jejak {target_display} di database...", parse_mode="HTML")
 
+    # Mulai pencarian menggunakan Telethon
     channels = ["bantaipenip", "rekampenipu", "spillhnr", "jejak_penipu"]
     found_posts = await search_with_userbot(targets_to_search, channels)
+
+    # Tambahkan Note khusus jika pencarian melibatkan nomor HP
+    note_tambahan = ""
+    if phone_variations:
+        note_tambahan = "\n\n📝 <b>Note:</b> untuk pengecheckan via nomer wajib waspada, kadang penipu berganti ganti payment."
 
     if found_posts:
         teks_hasil = f"⚠️ <b>PERHATIAN!</b> Rekam jejak {target_display} <b>DITEMUKAN</b> di database.\n\nKemungkinan yang bersangkutan adalah pelaku/korban penipuan:\n"
         for link in found_posts: teks_hasil += f"𔐼 {link}\n"
+        teks_hasil += note_tambahan
         await loading_msg.edit_text(teks_hasil, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
     else:
         keyboard = [[InlineKeyboardButton(f"🔍 Cek @{ch}", url=f"https://t.me/{ch}")] for ch in channels]
         reply_text = f"✅ {target_display} <b>belum ditemukan</b> di database otomatis kami.\n\n⚠️ Silakan buka dan cek ulang secara manual:"
+        reply_text += note_tambahan
         await loading_msg.edit_text(reply_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 async def check_penipu(update: Update, context: CallbackContext):
@@ -553,6 +596,29 @@ async def start(update: Update, context: CallbackContext):
         keyboard = [[InlineKeyboardButton("Join Channels", url=f"https://t.me/{c[1:]}")] for c in required_channels]
         await update.message.reply_text("Sebelum lanjut, silakan join channel berikut dulu ya!", reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
 
+async def trigger_radar_notifications(context: CallbackContext, text_content: str, post_url: str):
+    text_lower = text_content.lower()
+    notified_users = set()
+    
+    # Scan seluruh keyword yang ada di cache
+    for keyword, users in CACHE_RADAR.items():
+        # Menggunakan regex boundary \b agar tidak salah deteksi (contoh: keyword "ml" tidak trigger di kata "html")
+        if re.search(rf'\b{re.escape(keyword)}\b', text_lower):
+            for uid in users:
+                notified_users.add(uid)
+                
+    # Kirim notifikasi ke user yang nyangkut
+    for uid in notified_users:
+        try:
+            await context.bot.send_message(
+                chat_id=uid, 
+                text=f"📡 *BINGO! Radar Incaranmu Berbunyi!*\n\nAda menfess baru yang cocok dengan keyword radarmu. Langsung sikat sebelum keduluan orang lain:\n{post_url}", 
+                parse_mode="Markdown"
+            )
+            await asyncio.sleep(0.05) # Jeda kecil menghindari flood limit Telegram
+        except Exception:
+            pass # Skip jika user memblokir bot
+
 async def handle_pesan(update: Update, context: CallbackContext):
     global bot_active, MENFESS_MODE
     if not update.effective_user or not update.message: return
@@ -661,6 +727,9 @@ async def handle_pesan(update: Update, context: CallbackContext):
                 else:
                     message_sent = await context.bot.copy_message(chat_id=CHANNEL_ID, from_chat_id=user_id, message_id=update.message.message_id)
 
+                post_url = f"https://t.me/{CHANNEL_ID[1:]}/{message_sent.message_id}"
+                asyncio.create_task(trigger_radar_notifications(context, text_content, post_url))
+
                 keyboard = [[InlineKeyboardButton("Lihat Pesan Kamu", url=f"https://t.me/{CHANNEL_ID[1:]}/{message_sent.message_id}")]]
                 await update.message.reply_text("Pesan kamu telah dikirim ke channel! 🪶\n\nJangan lupa kepoin channel base ya!", reply_markup=InlineKeyboardMarkup(keyboard))
                 try: await db(lambda: supabase.table("menfess_map").insert({"post_id": message_sent.message_id, "sender_user_id": user_id}).execute())
@@ -754,6 +823,10 @@ async def handle_callback_review(update: Update, context: CallbackContext):
                 else:
                     sent_msg = await context.bot.copy_message(chat_id=CHANNEL_ID, from_chat_id=ADMIN_GROUP_ID, message_id=original_msg.message_id)
 
+                post_url = f"https://t.me/{CHANNEL_ID[1:]}/{sent_msg.message_id}"
+                menfess_text = original_msg.text or original_msg.caption or ""
+                asyncio.create_task(trigger_radar_notifications(context, menfess_text, post_url))
+
                 if not comsect_on: CACHE_COMSECT_OFF.add(sent_msg.message_id)
                 log_msg = f"📌 Log Menfess (Manual Approved):\n🆔 Pengirim ID: `{user_id}`\n⚙️ Comsect: {'ON' if comsect_on else 'OFF'}"
                 await context.bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="Markdown")
@@ -843,6 +916,60 @@ async def handle_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await context.bot.send_message(chat_id=sender_user_id, text=notif_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Lihat Balasan", url=link)]]), parse_mode="Markdown")
         except Exception: pass
+
+async def manage_radar(update: Update, context: CallbackContext):
+    if update.effective_chat.type != "private": return
+    user_id = update.effective_user.id
+    args = context.args
+
+    if not args:
+        return await update.message.reply_text(
+            "📡 *Smart Radar*\n\nDapatkan notif otomatis jika ada barang incaranmu yang lewat di base!\n\n"
+            "Format:\n"
+            "➕ `/radar add <keyword>` (Contoh: `/radar add netflix`)\n"
+            "➖ `/radar remove <keyword>`\n"
+            "📋 `/radar list`", 
+            parse_mode="Markdown"
+        )
+
+    action = args[0].lower()
+    
+    if action == "list":
+        response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
+        keywords = [r['keyword'] for r in response.data] if hasattr(response, 'data') and response.data else []
+        if not keywords: 
+            return await update.message.reply_text("Kamu belum punya keyword radar incaran.")
+        return await update.message.reply_text(f"📡 *Radar Incaranmu:*\n- " + "\n- ".join(keywords), parse_mode="Markdown")
+
+    if len(args) < 2: 
+        return await update.message.reply_text(f"❌ Format: `/radar {action} <keyword>`", parse_mode="Markdown")
+    
+    keyword = " ".join(args[1:]).lower()
+
+    if action == "add":
+        # Check current keywords for limit
+        response = await db(lambda: supabase.table("user_radars").select("keyword").eq("user_id", user_id).execute())
+        current_kws = [r['keyword'].lower() for r in response.data] if hasattr(response, 'data') and response.data else []
+        
+        if len(current_kws) >= 10:
+            return await update.message.reply_text("❌ Batas maksimal radar adalah 10 keyword!")
+        if keyword in current_kws:
+            return await update.message.reply_text("⚠️ Keyword tersebut sudah ada di radarmu.")
+        
+        try:
+            await db(lambda: supabase.table("user_radars").insert({"user_id": user_id, "keyword": keyword}).execute())
+            await update_radar_cache() # Segarkan cache di RAM
+            await update.message.reply_text(f"✅ Keyword `{keyword}` berhasil ditambahkan ke radar!", parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text("❌ Gagal menyimpan radar.")
+            
+    elif action in ["remove", "del", "delete"]:
+        try:
+            await db(lambda: supabase.table("user_radars").delete().eq("user_id", user_id).eq("keyword", keyword).execute())
+            await update_radar_cache() # Segarkan cache di RAM
+            await update.message.reply_text(f"🗑️ Keyword `{keyword}` dihapus dari radar!", parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text("❌ Gagal menghapus radar.")
 
 async def open_bot(update: Update, context: CallbackContext):
     global bot_active
@@ -1040,6 +1167,7 @@ def main():
 
   # Ini dia handler fitur barunya (Check Penipu)
     application.add_handler(CommandHandler("check", check_penipu))
+    application.add_handler(CommandHandler("radar", manage_radar))
 
     # Message & Callback Handlers
     application.add_handler(CallbackQueryHandler(handle_callback_review))
