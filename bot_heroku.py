@@ -670,8 +670,7 @@ async def handle_pesan(update: Update, context: CallbackContext):
     if text_content == "📡 Radar Incaran":
         return await update.message.reply_text(
             "📡 *Smart Radar Bazarfess*\n\n"
-            "Pilih menu di bawah ini untuk mengatur radar incaranmu:",
-            "\nBot akan otomatis memberikan notifikasi untuk setiap menfess yang sesuai",
+            "Pilih menu di bawah ini untuk mengatur radar incaranmu, lalu bot akan otomatis memberikan notifikasi untuk setiap menfess yang sesuai",
             parse_mode="Markdown",
             reply_markup=get_radar_keyboard()
         )
