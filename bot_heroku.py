@@ -137,6 +137,7 @@ async def on_startup(application: Application):
         await update_settings_cache()
         await update_hashtags_cache()
         await update_badwords_cache()
+        await update_radar_cache()
         await update_required_channels_cache()
         await update_banned_users_cache()
 
