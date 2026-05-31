@@ -805,7 +805,7 @@ async def handle_pesan(update: Update, context: CallbackContext):
     if update.message.text and "check penipu" in text_content_lower:
         context.user_data["keyboard_state"] = KEYBOARD_STATE_CHECK_PENIPU
         await update.message.reply_text(
-            "🔍 *Check Penipu*\n\nKetik ID atau username target. Contoh: `@username` atau `123456789`.",
+            "🔍 *Check Penipu*\n\nKetik ID atau username atau nomor target. Contoh: `@username` atau `123456789` atau `08123456789`.",
             parse_mode="Markdown",
             reply_markup=get_cancel_keyboard()
         )
